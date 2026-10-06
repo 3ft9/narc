@@ -246,6 +246,30 @@ func TestReconcile(t *testing.T) {
 	}
 }
 
+func TestReconcileStopsAllocOutlivingJob(t *testing.T) {
+	ctx := t.Context()
+	gh, n := &fakeGitHub{}, newFakeNomad()
+	s := newTestScaler(gh, n, 1, 0)
+	s.HandleDesiredRunnerCount(ctx, 1)
+	var r *runner
+	for _, v := range s.runners {
+		r = v
+	}
+	n.jobs[r.jobID].Status = "running"
+	s.HandleJobCompleted(ctx, &scaleset.JobCompleted{RunnerName: r.name})
+	s.demand = 0
+
+	s.Reconcile(ctx)
+	if len(n.stopped) != 0 {
+		t.Fatalf("stopped within grace: %v", n.stopped)
+	}
+	s.now = func() time.Time { return time.Now().Add(completedGrace + time.Minute) }
+	s.Reconcile(ctx)
+	if !slices.Equal(n.stopped, []string{r.jobID}) {
+		t.Fatalf("stopped = %v", n.stopped)
+	}
+}
+
 func TestRecover(t *testing.T) {
 	ctx := t.Context()
 	gh, n := &fakeGitHub{}, newFakeNomad()
