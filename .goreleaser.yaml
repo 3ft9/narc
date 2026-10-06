@@ -1,0 +1,26 @@
+version: 2
+
+builds:
+  - env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+
+archives:
+  - formats: [tar.gz]
+    files: [LICENSE, README.md, jobs/*, policies/*, deploy/*, examples/*, scripts/*]
+
+checksum:
+  name_template: checksums.txt
+
+dockers_v2:
+  - images: ["ghcr.io/3ft9/narc"]
+    tags: ["{{ .Version }}", "latest"]
+    platforms: [linux/amd64, linux/arm64]
+    extra_files: [scripts/narc-image-fetch]
+    labels:
+      org.opencontainers.image.source: https://github.com/3ft9/narc
+      org.opencontainers.image.licenses: MIT
+
+changelog:
+  use: github-native

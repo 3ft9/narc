@@ -1,0 +1,36 @@
+# Example narc config. In production this is rendered by the template in
+# narc.nomad.hcl; secrets are written to files from Nomad Variables.
+
+listen = ":9090"                    # /metrics and /healthz
+
+[nomad]
+namespace = "default"               # address and token come from workload identity
+# state_variable = "narc/state"     # where narc records the scale sets it created
+
+# An org: one scale set serves every repo in it.
+[[target]]
+url = "https://github.com/3ft9"
+[target.auth]                       # GitHub App (preferred)
+app_client_id    = "Iv23liExample"
+installation_id  = 12345678
+private_key_file = "secrets/app.pem"
+
+[[target.scaleset]]
+name = "nomad-linux"                # runs-on: nomad-linux
+job  = "narc-runner-qemu"           # parameterized Nomad job to dispatch
+max  = 4                            # most runners alive at once
+warm = 1                            # idle runners kept booted; counts towards max
+# labels       = ["nomad-linux"]    # defaults to [name]
+# runner_group = "default"
+# max_duration = "6h15m"            # runners older than this are stopped
+
+# Personal-account repos can't have account-wide runners: one target per repo.
+[[target]]
+url = "https://github.com/stut/some-repo"
+[target.auth]
+token_file = "secrets/pat"          # PAT fallback
+
+[[target.scaleset]]
+name = "nomad-linux"
+job  = "narc-runner-qemu"
+max  = 2

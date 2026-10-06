@@ -1,0 +1,45 @@
+#!/bin/sh
+# Prestart step for narc runner jobs: make sure the base image is in the
+# per-node cache (downloading and verifying it on first use), then create a
+# per-allocation copy-on-write overlay backed by it.
+#
+# The cache directory must be mounted at the same path the QEMU task sees on
+# the host, because the overlay records the backing file's absolute path.
+#
+# TODO(cache GC): cached images are never removed when a pin changes. The
+# mtime touch below is there so a future GC can remove images unused for N days.
+set -eu
+
+: "${IMAGE_URL:?IMAGE_URL is required}"
+: "${IMAGE_SHA256:?IMAGE_SHA256 is required}"
+: "${IMAGE_FORMAT:=qcow2}"
+: "${DISK_SIZE:=40G}"
+: "${CACHE_DIR:=/var/lib/narc/images}"
+: "${OVERLAY:=${NOMAD_ALLOC_DIR:?}/disk.qcow2}"
+
+case "$IMAGE_SHA256" in
+  *[!0-9a-f]* | "") echo "IMAGE_SHA256 must be a lowercase hex SHA-256" >&2; exit 1 ;;
+esac
+[ "${#IMAGE_SHA256}" -eq 64 ] || { echo "IMAGE_SHA256 must be 64 hex characters" >&2; exit 1; }
+
+base="$CACHE_DIR/$IMAGE_SHA256.$IMAGE_FORMAT"
+
+# ponytail: one lock for the whole cache, so concurrent first downloads of
+# different images queue; per-image locks if that ever matters.
+(
+  flock 9
+  if [ ! -f "$base" ]; then
+    echo "fetching $IMAGE_URL"
+    tmp=$(mktemp "$CACHE_DIR/.download.XXXXXX")
+    trap 'rm -f "$tmp"' EXIT
+    curl -fsSL --retry 3 -o "$tmp" "$IMAGE_URL"
+    echo "$IMAGE_SHA256  $tmp" | sha256sum -c - >/dev/null || { echo "SHA-256 mismatch for $IMAGE_URL" >&2; exit 1; }
+    chmod 0444 "$tmp"
+    mv "$tmp" "$base"
+    trap - EXIT
+  fi
+) 9>"$CACHE_DIR/.lock"
+
+touch "$base"
+qemu-img create -q -f qcow2 -b "$base" -F "$IMAGE_FORMAT" "$OVERLAY" "$DISK_SIZE"
+echo "created $OVERLAY ($DISK_SIZE) backed by $base"

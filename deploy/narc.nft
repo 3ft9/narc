@@ -1,0 +1,51 @@
+# nftables rules for runner VMs: internet egress only.
+#
+# Traffic from runner allocations enters the host on the "narc" bridge (see
+# narc.conflist). These chains run before the usual filter chains and only
+# drop; NAT and accept are left to the CNI bridge plugin and your firewall.
+#
+# Fill node_addrs with every Nomad node's own public addresses: services bound
+# to 0.0.0.0 would otherwise be reachable through them.
+
+table inet narc {
+  set blocked_v4 {
+    type ipv4_addr
+    flags interval
+    elements = {
+      0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+      172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4
+    }
+  }
+
+  set blocked_v6 {
+    type ipv6_addr
+    flags interval
+    elements = { ::1/128, fc00::/7, fe80::/10, ff00::/8 }
+  }
+
+  set node_addrs {
+    type ipv4_addr
+    flags interval
+    # elements = { 203.0.113.1, 203.0.113.2, 203.0.113.3 }
+  }
+
+  set node_addrs_v6 {
+    type ipv6_addr
+    flags interval
+  }
+
+  # Routed traffic: other nodes, private ranges, metadata.
+  chain forward {
+    type filter hook forward priority filter - 10; policy accept;
+    iifname "narc" ip daddr @blocked_v4 drop
+    iifname "narc" ip daddr @node_addrs drop
+    iifname "narc" ip6 daddr @blocked_v6 drop
+    iifname "narc" ip6 daddr @node_addrs_v6 drop
+  }
+
+  # Traffic to this node itself, on any of its addresses.
+  chain input {
+    type filter hook input priority filter - 10; policy accept;
+    iifname "narc" drop
+  }
+}

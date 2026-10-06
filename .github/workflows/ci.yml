@@ -1,0 +1,33 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Install Nomad
+        run: |
+          curl -fsSL -o nomad.zip https://releases.hashicorp.com/nomad/1.11.3/nomad_1.11.3_linux_amd64.zip
+          unzip nomad.zip && sudo mv nomad /usr/local/bin/
+      - name: Integration tests (nomad agent -dev)
+        run: go test -tags integration -run Integration -v ./...
+
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - run: nix flake check
+      - run: nix build .#narc

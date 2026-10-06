@@ -1,0 +1,201 @@
+# narc
+
+**Nomad Action Runners Coordinator.** An autoscaler for ephemeral GitHub Actions self-hosted runners on [Nomad](https://www.nomadproject.io/), doing the job [actions-runner-controller](https://github.com/actions/actions-runner-controller) does on Kubernetes.
+
+narc registers runner scale sets with GitHub, long-polls the scale set API for demand (via [`actions/scaleset`](https://github.com/actions/scaleset)), and dispatches one Nomad parameterized job per runner with a single-use just-in-time (JIT) config. Each runner takes one job and exits. The reference runner job boots a fresh QEMU/KVM VM per job, with root and a real Docker daemon inside, the same model as GitHub-hosted runners.
+
+> [!WARNING]
+> **Runner versions.** The reference job installs the latest `actions/runner` release on every boot. You can pin a version instead (`runner_version`), but if you do, you have to keep the pin current. GitHub refuses runners that fall too far behind its latest release, so a stale pin will eventually stop jobs from running, with little warning.
+
+## How it works
+
+```
+GitHub scale set API ──long poll──▶ narc ──dispatch──▶ Nomad parameterized job ──▶ QEMU VM ──▶ run.sh --jitconfig
+                                     │                       ▲
+                                     └─ Nomad Variable ──────┘ (JIT config, deleted once the task starts)
+```
+
+- **One scale set per runner shape.** A workflow's `runs-on` picks a scale set by name, and each scale set dispatches one Nomad job. Constraints, resources, image and driver live in that job. JIT runners aren't bound to a job, so per-job placement from labels isn't possible.
+- **Demand.** For each scale set narc keeps `min(max, assigned jobs + warm)` runners alive. It never scales down: runners exit when their job is done, and warm runners wait for one.
+- **JIT config delivery.** narc writes the JIT config to the Nomad Variable `nomad/jobs/<runner job>/<runner name>` *before* dispatching, with meta `runner_name`. The runner job's template renders it into the VM's cloud-init seed. narc deletes the variable as soon as every task in the allocation has started, or when the allocation ends, or if the dispatch fails.
+- **No retries.** A JIT config is single-use, so runner jobs must not restart or reschedule. If an allocation ends before its runner completes a job (VM crash, failed boot, OOM kill), narc removes the runner registration from GitHub.
+- **Max duration.** narc stops any runner older than `max_duration` (default 6h15m: GitHub's 6 h job limit plus a margin).
+- **Stateless.** On startup narc adopts live dispatched children of its runner jobs, sweeps JIT config variables that have no live child, and reconciles against GitHub's statistics. Jobs queue at GitHub while narc is down; running runners are unaffected.
+- **Scale set lifecycle.** On startup narc creates or updates every configured scale set, and deletes scale sets *it created* that are no longer configured. It records what it created in the Nomad Variable `narc/state`, because the scale set API can't list or tag them. Scale sets narc didn't create are never deleted.
+
+## Requirements
+
+**Nomad clients that run runner VMs** need:
+
+- `/dev/kvm` (bare metal, or nested virtualisation).
+- QEMU on the Nomad agent's `PATH` (`qemu-system-x86_64`). The built-in `qemu` driver is detected automatically.
+- CNI plugins and the `cni/narc` network: [`deploy/narc.conflist`](deploy/narc.conflist) in the client's `cni_config_dir`.
+- The egress firewall: [`deploy/narc.nft`](deploy/narc.nft), with `node_addrs` filled in with every node's public addresses.
+- A host volume `narc-images` for the per-node image cache (for example `/var/lib/narc/images`).
+- The Docker driver, for the reference job's prestart task.
+
+On NixOS, the flake's module does all of that except KVM:
+
+```nix
+{
+  inputs.narc.url = "github:3ft9/narc";
+  # ...
+  imports = [ narc.nixosModules.node ];
+  networking.nftables.enable = true;
+  services.narc-node = {
+    enable = true;
+    nodeAddresses = [ "203.0.113.1" "203.0.113.2" "203.0.113.3" ];
+  };
+}
+```
+
+If the qemu plugin has an `args_allowlist`, it must allow `-cpu`, `-smp`, `-nic` and `-drive`.
+
+**The Nomad cluster** needs ACLs with workload identity (Nomad 1.7+; tested against 1.11 and 2.0).
+
+## Setup
+
+### 1. Create a GitHub App
+
+Create one App and install it on every org and account narc serves. Under **Settings → Developer settings → GitHub Apps → New GitHub App**:
+
+- Webhook: off. narc doesn't need public ingress.
+- Repository permissions: **Administration: read and write** (repo-level runners), **Metadata: read**.
+- Organization permissions: **Self-hosted runners: read and write** (org-level runners).
+- Generate a private key, and note the **Client ID**.
+- Install the App on the org (all repos, or selected) and on the personal account for any personal repos. The installation ID is the number at the end of the installation's settings URL.
+
+A personal access token also works (classic: `repo` for repo targets, `admin:org` for org targets), but the App is preferred.
+
+Personal accounts can't have account-wide runners: each personal repo needs its own `[[target]]`.
+
+### 2. Register the runner job
+
+Edit the variables at the top of [`jobs/narc-runner-qemu.nomad.hcl`](jobs/narc-runner-qemu.nomad.hcl), at least `image_sha256` (from the image release's `SHA256SUMS`). Then:
+
+```sh
+nomad job run jobs/narc-runner-qemu.nomad.hcl
+nomad acl policy apply -namespace default -job narc-runner-qemu \
+  narc-runner-qemu policies/narc-runner.policy.hcl
+```
+
+The job-attached policy lets the runner job's template read its per-runner variables. Implicit workload identity access covers only exact paths, not sub-paths.
+
+### 3. Run narc
+
+```sh
+nomad var put nomad/jobs/narc app_private_key=@app.pem
+nomad acl policy apply -namespace default -job narc narc policies/narc.policy.hcl
+nomad job run jobs/narc.nomad.hcl
+```
+
+Edit the config in the template in [`jobs/narc.nomad.hcl`](jobs/narc.nomad.hcl) first. Changing the config means re-running the job, which restarts narc. There's no hot reload.
+
+### 4. Use it
+
+```yaml
+jobs:
+  build:
+    runs-on: nomad-linux
+```
+
+## Configuration
+
+TOML. A full example with comments is in [`examples/narc.toml`](examples/narc.toml).
+
+| Key | Default | |
+|---|---|---|
+| `listen` | `:9090` | Address for `/metrics` and `/healthz`. |
+| `nomad.namespace` | `default` | Namespace of the runner jobs. Address and token come from `NOMAD_ADDR`/`NOMAD_TOKEN` (workload identity). |
+| `nomad.state_variable` | `narc/state` | Variable recording the scale sets narc created. |
+| `target.url` | required | `https://github.com/<org>` or `https://github.com/<owner>/<repo>`. GHES URLs work too. |
+| `target.auth.app_client_id`, `installation_id`, `private_key_file` | | GitHub App credentials. |
+| `target.auth.token_file` | | PAT, instead of an App. |
+| `target.scaleset.name` | required | Scale set name; what `runs-on` uses. Unique per target. |
+| `target.scaleset.job` | required | Parameterized Nomad job to dispatch. Several scale sets may share one. |
+| `target.scaleset.max` | required | Most runners alive at once (≥ 1). |
+| `target.scaleset.warm` | `0` | Idle runners kept booted. Counts towards `max`. |
+| `target.scaleset.labels` | `[name]` | Scale set labels. |
+| `target.scaleset.runner_group` | `default` | GitHub runner group. |
+| `target.scaleset.max_duration` | `6h15m` | Runners older than this are stopped. |
+
+## Runner job contract
+
+narc is driver-agnostic: any job meeting this contract works. A runner job must:
+
+- be a **parameterized batch job** accepting meta `runner_name`
+- render the JIT config from `nomad/jobs/<parent job>/<runner_name>` (key `jitconfig`) with **`change_mode = "noop"`**
+  ```hcl
+  {{ with nomadVar (printf "nomad/jobs/%s/%s" (env "NOMAD_JOB_PARENT_ID") (env "NOMAD_META_runner_name")) }}{{ .jitconfig }}{{ end }}
+  ```
+- set **`restart { attempts = 0 }`** and **`reschedule { attempts = 0, unlimited = false }`**
+- run `run.sh --jitconfig …` and exit when the runner exits
+- not expose workload identity to the task
+- join the `cni/narc` network (or provide equivalent egress isolation)
+
+narc checks the job type, parameterization and retry settings before starting each scale set's listener, and won't start a scale set whose job breaks them. It rechecks on every retry, so fixing the job is enough.
+
+### The reference QEMU job
+
+[`jobs/narc-runner-qemu.nomad.hcl`](jobs/narc-runner-qemu.nomad.hcl):
+
+1. **Prestart** (`narc-image-fetch`, in the narc image): if the base image isn't in the node cache, downloads it, checks its SHA-256 and atomically moves it into place, under a lock. Then creates a per-allocation qcow2 overlay of `disk_size` in the alloc dir. Only the first job on each node pays for the download.
+2. **VM**: boots the overlay under KVM, with a cloud-init NoCloud seed (`user-data`, `meta-data`, `network-config`) rendered into `secrets/seed` and attached with QEMU's `vvfat` as a FAT disk labelled `CIDATA`.
+3. **cloud-init** installs Docker and the runner, runs the runner as user `runner` (passwordless sudo, in group `docker`), then powers off, which ends the task.
+
+`user-data` is where you customise the VM: extra packages and setup steps. Repos that need a specific environment should use [job containers](https://docs.github.com/en/actions/using-jobs/running-jobs-in-a-container) (`container:`), which work because the VM has a real Docker daemon. VM images are per scale set, never per repo.
+
+Any image that boots under KVM, reads a NoCloud seed (or mounts the `CIDATA` disk itself), runs the runner, and powers off afterwards will work. Set `image_url` and `image_sha256`.
+
+## Security model
+
+- **Untrusted code runs in a VM.** Each job gets a fresh VM behind a hardware virtualisation boundary, with a copy-on-write disk deleted with the allocation. Nothing persists between jobs. The workload never gets privileges on the node.
+- **Internet egress only.** Runner VMs sit on their own CNI bridge. The nftables rules drop traffic from it to RFC 1918, CGNAT/tailnet (`100.64.0.0/10`), link-local and metadata, loopback, IPv6 ULA and link-local, every node's public addresses, and the node itself. No CI job can reach Nomad, Consul, Vault or anything else in the cluster. Guests use public DNS resolvers.
+- **The JIT config is a credential.** Whoever reads it first can take the runner's job, secrets included. It never appears in dispatch meta or payloads, which anyone with `read-job` can see. It lives in a Nomad Variable for seconds, readable only by narc (write/destroy) and the runner job's template; then it's in the task's `secrets/` dir (not exposed by `nomad alloc fs`) and the VM's seed disk. By the time any workflow step runs, it has been used.
+- **Least-privilege Nomad access.** narc uses workload identity with no long-lived token. Its policy grants `list-jobs`, `read-job`, `dispatch-job` and `alloc-lifecycle`, plus variables under the runner jobs' prefixes. It deliberately doesn't grant `submit-job`, which would let a compromised narc register arbitrary jobs. As a result, narc can't stop a dispatched runner that never got placed; that job stays pending until it's placed (and then stopped) or removed by hand.
+- **Sibling visibility.** Each dispatch of a runner job could technically read every sibling's variable, but only through its template, which the jobspec controls. The guest has no Nomad token.
+- **Untrusted pull requests.** The VM boundary protects the cluster, not your secrets. GitHub's usual rules about running workflows from forks still apply.
+
+## Observability
+
+- `/metrics` (Prometheus):
+  - `narc_runners{target,scaleset,state}`: live runners: `starting`, `idle` (booted, waiting) and `busy`
+  - `narc_github_assigned_jobs`, `narc_github_running_jobs`: from GitHub's statistics
+  - `narc_dispatch_failures_total`
+  - `narc_boot_to_job_start_seconds`: dispatch to job start
+  - `narc_runner_deregistrations_total`: runners removed because their allocation ended without completing a job
+  - `narc_variable_sweeps_total`: orphaned JIT config variables removed on startup
+- `/healthz`: 200 once every scale set has an active message session, otherwise 503.
+- JSON logs on stdout.
+
+## Testing
+
+```sh
+go test ./...                                         # unit tests
+go test -tags integration -run Integration -v ./...   # needs `nomad` on PATH
+```
+
+The integration test starts an ACL-enabled `nomad agent -dev` on port 14646. It applies the shipped policies to a stub `raw_exec` runner job and a narc token, then runs a runner through dispatch, variable deletion, completion, deregistration, restart adoption and max-duration stop. Missing ACL capabilities fail it.
+
+### End to end
+
+This needs real GitHub credentials, so it doesn't run in CI.
+
+1. Create a test repo, and install the GitHub App on it (or use a PAT).
+2. On a KVM node with the requirements above, register the runner job and run narc with a target for the test repo and a scale set, for example `narc-e2e` with `max = 1`.
+3. Check `/healthz` returns 200, and that the scale set appears under the repo's **Settings → Actions → Runners**.
+4. Push a workflow with `runs-on: narc-e2e` that runs `docker run --rm hello-world` and `sudo true`.
+5. Watch for: a dispatched `narc-runner-qemu/dispatch-…` job; `nomad var list nomad/jobs/narc-runner-qemu/` empty within seconds of the VM task starting; the job passing; the VM powering off and the allocation completing; `narc_runners` back to `warm`.
+6. Kill a VM mid-job (`nomad alloc stop`) and check that the runner disappears from GitHub and `narc_runner_deregistrations_total` increases.
+7. Remove the scale set from the config, restart narc, and check that it's deleted on GitHub.
+
+## Not yet done
+
+- **Image cache garbage collection (required).** Cached base images are never removed when `image_sha256` changes, so node disks fill up over time. `narc-image-fetch` touches each image's mtime on use, so a GC can remove images unused for N days.
+- Podman reference job for trusted, Docker-free workloads.
+- Per-node image preparation (bake the runner and Docker in once per node) if boot time hurts.
+- Out of scope: HA/leader election (GitHub allows one session per scale set anyway), hot config reload, Firecracker, runner container hooks, an in-cluster image mirror.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
