@@ -66,7 +66,7 @@ Create one App and install it on every org and account narc serves. Under **Sett
 
 A personal access token also works (classic: `repo` for repo targets, `admin:org` for org targets), but the App is preferred.
 
-Personal accounts can't have account-wide runners: each personal repo needs its own `[[target]]`.
+Personal accounts can't have account-wide runners: each personal repo needs its own `[[target]]`. One App installed on both an org and a personal account serves every target: use the same `app_client_id` and private key, with each installation's own `installation_id`.
 
 ### 2. Register the runner job
 
@@ -97,6 +97,8 @@ jobs:
   build:
     runs-on: nomad-linux
 ```
+
+If the CI that deploys narc (or its runner jobs, or the nodes) runs on narc, a broken narc can't deploy its own fix. Keep those workflows on a runner label narc doesn't serve, such as `ubuntu-latest`, or be ready to deploy by hand.
 
 ## Configuration
 
@@ -132,6 +134,8 @@ narc is driver-agnostic: any job meeting this contract works. A runner job must:
 - run `run.sh --jitconfig …` and exit when the runner exits
 - not expose workload identity to the task
 - join the `cni/narc` network (or provide equivalent egress isolation)
+
+If a deploy tool manages your Nomad jobs, it must ignore dispatched children (`<job>/dispatch-…`). They inherit the parent job's meta, including any ownership marker, so a tool that stops "orphaned" jobs carrying its marker will stop live runners. Also, registering a parameterized job returns no evaluation ID, so don't wait on one.
 
 narc checks the job type, parameterization and retry settings before starting each scale set's listener, and won't start a scale set whose job breaks them. It rechecks on every retry, so fixing the job is enough.
 
