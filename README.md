@@ -146,6 +146,7 @@ narc checks the job type, parameterization and retry settings before starting ea
 1. **Prestart** (`narc-image-fetch`, in the narc image): if the base image isn't in the node cache, downloads it, checks its SHA-256 and atomically moves it into place, under a lock. Then creates a per-allocation qcow2 overlay of `disk_size` in the alloc dir. Only the first job on each node pays for the download.
 2. **VM**: boots the overlay under KVM, with a cloud-init NoCloud seed (`user-data`, `meta-data`, `network-config`) rendered into `secrets/seed` and attached with QEMU's `vvfat` as a FAT disk labelled `CIDATA`.
 3. **cloud-init** installs Docker and the runner, runs the runner as user `runner` (passwordless sudo, in group `docker`), then powers off, which ends the task.
+4. **Poststop** deletes the overlay once the VM has exited. The overlay holds everything the job wrote (several GB for a typical build), and a dead allocation's directory stays on disk until the Nomad client garbage-collects it (see the client's `gc_*` settings), so without this a busy node's disk fills within hours.
 
 `user-data` is where you customise the VM: extra packages and setup steps. Repos that need a specific environment should use [job containers](https://docs.github.com/en/actions/using-jobs/running-jobs-in-a-container) (`container:`), which work because the VM has a real Docker daemon. VM images are per scale set, never per repo.
 

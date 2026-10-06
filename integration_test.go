@@ -57,6 +57,20 @@ job "narc-stub-runner" {
         EOT
       }
     }
+    task "cleanup" {
+      lifecycle {
+        hook = "poststop"
+      }
+      driver = "raw_exec"
+      config {
+        command = "/bin/sh"
+        args    = ["-c", "true"]
+      }
+      resources {
+        cpu    = 20
+        memory = 32
+      }
+    }
   }
 }
 `
@@ -151,8 +165,12 @@ func TestIntegrationRunnerLifecycle(t *testing.T) {
 	ctx := t.Context()
 	n, _ := startNomad(t)
 
-	if err := n.CheckRunnerJob(ctx, "narc-stub-runner"); err != nil {
+	poststop, err := n.CheckRunnerJob(ctx, "narc-stub-runner")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !slices.Equal(poststop, []string{"cleanup"}) {
+		t.Fatalf("poststop = %v", poststop)
 	}
 
 	// The owned scale set record round-trips under the narc policy.
@@ -175,6 +193,7 @@ func TestIntegrationRunnerLifecycle(t *testing.T) {
 	gh := &fakeGitHub{}
 	s := NewScaler(&ScaleSetConfig{Name: "nomad-linux", Job: "narc-stub-runner", Max: 2, MaxDuration: duration{time.Hour}},
 		"https://github.com/o", 7, gh, n, discard)
+	s.SetPoststop([]string{"cleanup"})
 	if err := Recover(ctx, n, "narc-stub-runner", []*Scaler{s}, discard); err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +248,7 @@ func TestIntegrationRunnerLifecycle(t *testing.T) {
 	s.mu.Unlock()
 	s2 := NewScaler(&ScaleSetConfig{Name: "nomad-linux", Job: "narc-stub-runner", Max: 2, MaxDuration: duration{time.Hour}},
 		"https://github.com/o", 7, gh, n, discard)
+	s2.SetPoststop([]string{"cleanup"})
 	if err := Recover(ctx, n, "narc-stub-runner", []*Scaler{s2}, discard); err != nil {
 		t.Fatal(err)
 	}
@@ -260,6 +280,7 @@ func TestIntegrationAgentRestart(t *testing.T) {
 	gh := &fakeGitHub{}
 	s := NewScaler(&ScaleSetConfig{Name: "nomad-linux", Job: "narc-stub-runner", Max: 1, MaxDuration: duration{time.Hour}},
 		"https://github.com/o", 7, gh, n, discard)
+	s.SetPoststop([]string{"cleanup"})
 	go n.Watch(ctx, []*Scaler{s}, discard)
 	time.Sleep(time.Second) // let the stream subscribe
 

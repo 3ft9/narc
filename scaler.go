@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,9 +67,10 @@ type Scaler struct {
 
 	active atomic.Bool // has a live message session
 
-	mu      sync.Mutex
-	demand  int
-	runners map[string]*runner
+	mu       sync.Mutex
+	demand   int
+	runners  map[string]*runner
+	poststop []string // runner job tasks that only start once the runner has ended
 }
 
 var _ listener.Scaler = (*Scaler)(nil)
@@ -214,24 +216,32 @@ func (s *Scaler) observe(ctx context.Context, r *runner, clientStatus string, ta
 		s.finish(ctx, r, "allocation "+clientStatus)
 		return true
 	}
-	if allStarted(tasks) {
+	if allStarted(tasks, s.poststop) {
 		r.started = true
 	}
 	return false
 }
 
-// allStarted reports whether every task has started at least once. (A
-// poststop task delays this until the allocation ends.)
-func allStarted(tasks map[string]*api.TaskState) bool {
+// allStarted reports whether every task except the poststop ones has
+// started at least once.
+func allStarted(tasks map[string]*api.TaskState, poststop []string) bool {
 	if len(tasks) == 0 {
 		return false
 	}
-	for _, t := range tasks {
-		if t == nil || t.StartedAt.IsZero() {
+	for name, t := range tasks {
+		if (t == nil || t.StartedAt.IsZero()) && !slices.Contains(poststop, name) {
 			return false
 		}
 	}
 	return true
+}
+
+// SetPoststop records the runner job's poststop tasks, which allStarted
+// mustn't wait for.
+func (s *Scaler) SetPoststop(tasks []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.poststop = tasks
 }
 
 func (s *Scaler) byJob(jobID string) *runner {

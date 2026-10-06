@@ -150,9 +150,11 @@ func setup(ctx context.Context, cfg *Config, nomad *nomadClient, log *slog.Logge
 func runScaleSet(ctx context.Context, s *Scaler, gh *scaleset.Client, nomad *nomadClient, log *slog.Logger) {
 	owner, _ := os.Hostname()
 	_ = retry(ctx, s.log, "listener", func() error {
-		if err := nomad.CheckRunnerJob(ctx, s.Job); err != nil {
+		poststop, err := nomad.CheckRunnerJob(ctx, s.Job)
+		if err != nil {
 			return err
 		}
+		s.SetPoststop(poststop)
 		session, err := gh.MessageSessionClient(ctx, s.ID, owner)
 		if err != nil {
 			return fmt.Errorf("message session: %w", err)
