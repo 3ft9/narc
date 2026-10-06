@@ -71,6 +71,8 @@ type Scaler struct {
 	demand   int
 	runners  map[string]*runner
 	poststop []string // runner job tasks that only start once the runner has ended
+
+	waitingSince time.Time // since when jobs have been waiting; zero if none are
 }
 
 var _ listener.Scaler = (*Scaler)(nil)
@@ -305,9 +307,37 @@ func (s *Scaler) deregister(ctx context.Context, r *runner) {
 // max_duration.
 const completedGrace = 10 * time.Minute
 
+// stuckTimeout is how long jobs may wait at GitHub while runners sit idle.
+// A healthy idle runner takes a waiting job within seconds, so idle runners
+// older than this are taken never to have come online (cloud-init failed,
+// say) and are replaced. GitHub's scale set API doesn't say which runners are
+// online.
+const stuckTimeout = 15 * time.Minute
+
+// jobsStuck reports whether GitHub has had more jobs assigned than this
+// scale set has busy runners for longer than stuckTimeout. Adopted runners
+// count as busy: their JobStarted, if any, came before narc restarted.
+func (s *Scaler) jobsStuck() bool {
+	taken := 0
+	for _, r := range s.runners {
+		if r.busy || r.adopted {
+			taken++
+		}
+	}
+	if s.demand <= taken {
+		s.waitingSince = time.Time{}
+		return false
+	}
+	if s.waitingSince.IsZero() {
+		s.waitingSince = s.now()
+	}
+	return s.now().Sub(s.waitingSince) > stuckTimeout
+}
+
 // Reconcile is the periodic backstop for everything the event stream should
 // have told us: ended jobs, started tasks, runners whose allocation outlives
-// their job, and runners over max duration.
+// their job, idle runners that never take a waiting job, and runners over
+// max duration.
 func (s *Scaler) Reconcile(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -319,6 +349,7 @@ func (s *Scaler) Reconcile(ctx context.Context) error {
 	for _, c := range children {
 		status[c.ID] = c.Status
 	}
+	stuck := s.jobsStuck()
 	for _, r := range s.runners {
 		if st, ok := status[r.jobID]; !ok || st == "dead" {
 			s.finish(ctx, r, "nomad job gone or dead")
@@ -337,6 +368,8 @@ func (s *Scaler) Reconcile(ctx context.Context) error {
 		switch {
 		case !r.completed.IsZero() && s.now().Sub(r.completed) > completedGrace:
 			why = "allocation still running after its job completed"
+		case stuck && !r.busy && !r.adopted && s.now().Sub(r.dispatched) > stuckTimeout:
+			why = "jobs waiting but this idle runner hasn't taken one"
 		case s.now().Sub(r.dispatched) > s.MaxDuration:
 			why = "runner exceeded max duration"
 		default:
