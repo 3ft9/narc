@@ -272,6 +272,41 @@ func TestReconcileStopsAllocOutlivingJob(t *testing.T) {
 	}
 }
 
+func TestReconcileReplacesRunnerThatNeverTakesAJob(t *testing.T) {
+	ctx := t.Context()
+	gh, n := &fakeGitHub{}, newFakeNomad()
+	s := newTestScaler(gh, n, 2, 0)
+	s.HandleDesiredRunnerCount(ctx, 2)
+	ids := slices.Sorted(maps.Keys(n.jobs))
+	for _, id := range ids {
+		n.jobs[id].Status = "running"
+	}
+	busy := s.byJob(ids[0])
+	s.HandleJobStarted(ctx, &scaleset.JobStarted{RunnerName: busy.name, RunnerID: 1})
+	start := time.Now()
+
+	// One job waits while the other runner sits idle: give it a while...
+	s.now = func() time.Time { return start.Add(20 * time.Minute) }
+	s.Reconcile(ctx)
+	if len(n.stopped) != 0 {
+		t.Fatalf("stopped as soon as a job waited: %v", n.stopped)
+	}
+	// ...then replace it, but never the busy one.
+	s.now = func() time.Time { return start.Add(20*time.Minute + stuckTimeout + time.Second) }
+	s.Reconcile(ctx)
+	if !slices.Equal(n.stopped, []string{ids[1]}) {
+		t.Fatalf("stopped = %v, want %v", n.stopped, ids[1])
+	}
+
+	// No job waiting: idle runners are left alone however old.
+	n.stopped = nil
+	s.HandleDesiredRunnerCount(ctx, 1)
+	s.Reconcile(ctx)
+	if len(n.stopped) != 0 {
+		t.Fatalf("stopped with no job waiting: %v", n.stopped)
+	}
+}
+
 func TestRecover(t *testing.T) {
 	ctx := t.Context()
 	gh, n := &fakeGitHub{}, newFakeNomad()
