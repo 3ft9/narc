@@ -21,7 +21,7 @@ jobs:
         run: |
           curl -fsSL -o nomad.zip https://releases.hashicorp.com/nomad/1.11.3/nomad_1.11.3_linux_amd64.zip
           unzip nomad.zip && sudo mv nomad /usr/local/bin/
-      - name: Integration tests (nomad agent -dev)
+      - name: Integration tests (single-node nomad agent)
         run: go test -tags integration -run Integration -v ./...
 
   nix:

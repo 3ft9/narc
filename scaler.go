@@ -42,7 +42,7 @@ type runner struct {
 	runnerID   int64  // GitHub runner ID; 0 if unknown (adopted on startup)
 	dispatched time.Time
 	adopted    bool
-	varDeleted bool
+	started    bool // every task has started: booted, waiting for a job
 	busy       bool // JobStarted seen
 	done       bool // JobCompleted seen, so GitHub already removed the runner
 }
@@ -209,15 +209,14 @@ func (s *Scaler) observe(ctx context.Context, r *runner, clientStatus string, ta
 		s.finish(ctx, r, "allocation "+clientStatus)
 		return true
 	}
-	if !r.varDeleted && allStarted(tasks) {
-		s.deleteVar(ctx, r)
+	if allStarted(tasks) {
+		r.started = true
 	}
 	return false
 }
 
-// allStarted reports whether every task has started at least once. A task
-// only starts after its templates render, so by then the JIT config has been
-// read. (A poststop task delays this until the terminal backstop.)
+// allStarted reports whether every task has started at least once. (A
+// poststop task delays this until the allocation ends.)
 func allStarted(tasks map[string]*api.TaskState) bool {
 	if len(tasks) == 0 {
 		return false
@@ -241,11 +240,15 @@ func (s *Scaler) byJob(jobID string) *runner {
 
 // finish forgets a runner whose allocation or job has ended, cleaning up its
 // variable and, if GitHub never saw it complete a job, its registration.
+//
+// The variable lives until now, not just until the task starts: a restarted
+// Nomad agent re-renders the task's templates, and a nomadVar on a deleted
+// variable blocks forever, so the task would never see its VM exit. A
+// template that doesn't block instead re-renders the file without the JIT
+// config while the VM may still be reading it.
 func (s *Scaler) finish(ctx context.Context, r *runner, why string) {
 	s.log.Info("runner ended", "runner", r.name, "reason", why, "completed_job", r.done)
-	if !r.varDeleted {
-		s.deleteVar(ctx, r)
-	}
+	s.deleteVar(ctx, r)
 	if !r.done {
 		s.deregister(ctx, r)
 	}
@@ -255,9 +258,7 @@ func (s *Scaler) finish(ctx context.Context, r *runner, why string) {
 func (s *Scaler) deleteVar(ctx context.Context, r *runner) {
 	if err := s.nomad.DeleteVar(ctx, varPath(s.Job, r.name)); err != nil {
 		s.log.Error("delete variable failed", "runner", r.name, "error", err)
-		return
 	}
-	r.varDeleted = true
 }
 
 func (s *Scaler) deregister(ctx context.Context, r *runner) {
@@ -300,7 +301,7 @@ func (s *Scaler) Reconcile(ctx context.Context) error {
 			s.finish(ctx, r, "nomad job gone or dead")
 			continue
 		}
-		if !r.varDeleted {
+		if !r.started {
 			allocs, err := s.nomad.Allocs(ctx, r.jobID)
 			if err != nil {
 				s.log.Error("list allocations failed", "runner", r.name, "error", err)
@@ -335,7 +336,7 @@ func (s *Scaler) updateGauge() {
 		switch {
 		case r.busy:
 			busy++
-		case r.varDeleted:
+		case r.started:
 			idle++
 		default:
 			starting++

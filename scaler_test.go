@@ -153,16 +153,21 @@ func TestLifecycle(t *testing.T) {
 	ids := slices.Sorted(maps.Keys(n.jobs))
 	r0 := s.byJob(ids[0])
 
-	// Prestart task started, main task pending: keep the variable.
+	// Prestart task started, main task pending: still starting.
 	tasks := map[string]*api.TaskState{"fetch": {StartedAt: time.Now()}, "vm": {}}
 	s.Observe(ctx, ids[0], "pending", tasks)
-	if _, ok := n.vars[varPath("runner", r0.name)]; !ok {
-		t.Fatal("variable deleted before every task started")
+	if r0.started {
+		t.Fatal("started before every task started")
 	}
+	// Every task started: booted, but the variable stays until the allocation
+	// ends, so a restarted Nomad agent can render it again.
 	tasks["vm"] = &api.TaskState{StartedAt: time.Now()}
 	s.Observe(ctx, ids[0], "running", tasks)
-	if _, ok := n.vars[varPath("runner", r0.name)]; ok {
-		t.Fatal("variable not deleted on task start")
+	if !r0.started {
+		t.Fatal("not started once every task started")
+	}
+	if _, ok := n.vars[varPath("runner", r0.name)]; !ok {
+		t.Fatal("variable deleted while the allocation runs")
 	}
 
 	// Runner 0 runs a job and completes: no deregistration.
@@ -172,6 +177,9 @@ func TestLifecycle(t *testing.T) {
 	s.Observe(ctx, ids[0], "complete", tasks)
 	if len(gh.removed) != 0 {
 		t.Fatalf("completed runner deregistered: %v", gh.removed)
+	}
+	if _, ok := n.vars[varPath("runner", r0.name)]; ok {
+		t.Fatal("variable not deleted when the allocation ended")
 	}
 	// Demand 0 + warm 1 = 1 < 2 live, so no replacement.
 	if len(s.runners) != 2 {
@@ -230,7 +238,7 @@ func TestReconcile(t *testing.T) {
 	if len(s.runners) != 1 || len(gh.removed) != 2 {
 		t.Fatalf("runners=%d removed=%v", len(s.runners), gh.removed)
 	}
-	if len(n.vars) != 0 {
+	if _, ok := n.vars[varPath("runner", s.byJob(ids[2]).name)]; len(n.vars) != 1 || !ok {
 		t.Fatalf("variables left: %v", n.vars)
 	}
 	if !slices.Equal(n.stopped, []string{ids[2]}) {
