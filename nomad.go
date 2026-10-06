@@ -55,8 +55,8 @@ func (n *nomadClient) ListVars(ctx context.Context, prefix string) ([]string, er
 	return paths, err
 }
 
-func (n *nomadClient) Dispatch(ctx context.Context, job, runnerName string) (string, error) {
-	resp, _, err := n.c.Jobs().Dispatch(job, map[string]string{"runner_name": runnerName}, nil, "", n.w(ctx))
+func (n *nomadClient) Dispatch(ctx context.Context, job string, meta map[string]string) (string, error) {
+	resp, _, err := n.c.Jobs().Dispatch(job, meta, nil, "", n.w(ctx))
 	if err != nil {
 		return "", err
 	}
@@ -116,8 +116,12 @@ func checkRunnerJob(j *api.Job) error {
 	}
 	if p := j.ParameterizedJob; p == nil {
 		errs = append(errs, errors.New("must be parameterized"))
-	} else if !slices.Contains(p.MetaRequired, "runner_name") && !slices.Contains(p.MetaOptional, "runner_name") {
-		errs = append(errs, errors.New(`parameterized block must accept meta "runner_name"`))
+	} else {
+		for _, k := range dispatchMeta {
+			if !slices.Contains(p.MetaRequired, k) && !slices.Contains(p.MetaOptional, k) {
+				errs = append(errs, fmt.Errorf("parameterized block must accept meta %q", k))
+			}
+		}
 	}
 	for _, tg := range j.TaskGroups {
 		name := "group " + deref(tg.Name)

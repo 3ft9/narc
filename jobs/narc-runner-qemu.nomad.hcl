@@ -1,6 +1,7 @@
 # Reference runner job: one ephemeral GitHub Actions runner in a QEMU/KVM VM.
 #
-# narc dispatches this job once per runner with meta runner_name, after
+# narc dispatches this job once per runner with meta runner_name (and
+# narc_target and narc_scaleset, naming the scale set that owns it), after
 # writing the runner's JIT config to nomad/jobs/<this job>/<runner_name>.
 #
 # Register it, then attach its ACL policy so its template can read the
@@ -58,6 +59,7 @@ job "narc-runner-qemu" {
 
   parameterized {
     meta_required = ["runner_name"]
+    meta_optional = ["narc_target", "narc_scaleset"]
   }
 
   group "runner" {

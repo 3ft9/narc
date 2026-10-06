@@ -28,6 +28,7 @@ job "narc-stub-runner" {
   type = "batch"
   parameterized {
     meta_required = ["runner_name"]
+    meta_optional = ["narc_target", "narc_scaleset"]
   }
   group "runner" {
     restart {
