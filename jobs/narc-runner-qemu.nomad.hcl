@@ -70,6 +70,13 @@ job "narc-runner-qemu" {
     # Internet egress only; see deploy/narc.conflist and deploy/narc.nft.
     network {
       mode = "cni/narc"
+      # Docker gives fetch-image the host's resolv.conf, which usually names a
+      # loopback resolver (systemd-resolved, dnsmasq) that is unreachable from
+      # this network namespace, and narc.nft drops traffic to the node anyway.
+      # Use public resolvers, like the VM does.
+      dns {
+        servers = ["1.1.1.1", "9.9.9.9"]
+      }
     }
 
     ephemeral_disk {
