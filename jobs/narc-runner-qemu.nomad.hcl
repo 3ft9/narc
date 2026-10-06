@@ -135,7 +135,11 @@ job "narc-runner-qemu" {
       }
 
       config {
-        image_path  = "../alloc/disk.qcow2"
+        # Absolute, so the driver's allowlist check and QEMU agree on the
+        # file. The driver resolves a relative image_path against the alloc
+        # dir, but QEMU runs in the task dir, so "../alloc/disk.qcow2" passes
+        # only if the client's image_paths covers <data_dir>/alloc.
+        image_path  = "${NOMAD_ALLOC_DIR}/disk.qcow2"
         accelerator = "kvm"
         args = [
           "-cpu", "host",
