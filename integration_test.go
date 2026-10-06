@@ -4,8 +4,8 @@
 //
 //	go test -tags integration -run Integration ./...
 //
-// They start an ACL-enabled `nomad agent -dev` on port 14646, so nothing else
-// may be listening there.
+// They start an ACL-enabled single-node Nomad agent (server and client) on
+// port 14646, so nothing else may be listening there.
 package main
 
 import (
@@ -19,8 +19,10 @@ import (
 	"github.com/hashicorp/nomad/api"
 )
 
-// A stub runner job following the runner job contract, minus the VM: the
-// task fails unless the JIT config rendered, then sleeps like a short job.
+// A stub runner job following the runner job contract, minus the VM: it
+// sleeps like a short job, then fails unless the JIT config is still in the
+// rendered file. QEMU's vvfat seed disk reads files lazily, so the file must
+// keep the JIT config while the task runs.
 const stubRunnerJob = `
 job "narc-stub-runner" {
   type = "batch"
@@ -40,7 +42,7 @@ job "narc-stub-runner" {
       driver = "raw_exec"
       config {
         command = "/bin/sh"
-        args    = ["-c", "grep -q '^jit-' ${NOMAD_SECRETS_DIR}/jitconfig && sleep 3"]
+        args    = ["-c", "sleep 8 && grep -q '^jit-' ${NOMAD_SECRETS_DIR}/jitconfig"]
       }
       resources {
         cpu    = 20
@@ -58,15 +60,22 @@ job "narc-stub-runner" {
 }
 `
 
-// startNomad starts an ACL-enabled dev agent, registers the stub runner job
-// and returns a narc client limited to the shipped policies (with the runner
-// job name substituted), so missing capabilities fail the test.
-func startNomad(t *testing.T) *nomadClient {
+// startNomad starts an ACL-enabled agent, registers the stub runner job and
+// returns a narc client limited to the shipped policies (with the runner job
+// name substituted), so missing capabilities fail the test. restart kills the
+// agent (tasks keep running, as in a crash or upgrade) and starts it again on
+// the same state.
+func startNomad(t *testing.T) (n *nomadClient, restart func()) {
 	t.Helper()
-	cmd := exec.Command("nomad", "agent", "-dev", "-acl-enabled", "-config", "testdata/dev.hcl")
-	if err := cmd.Start(); err != nil {
-		t.Skipf("can't start nomad agent -dev: %v", err)
+	dataDir := t.TempDir()
+	var cmd *exec.Cmd
+	start := func() {
+		cmd = exec.Command("nomad", "agent", "-config", "testdata/agent.hcl", "-data-dir", dataDir)
+		if err := cmd.Start(); err != nil {
+			t.Skipf("can't start nomad agent: %v", err)
+		}
 	}
+	start()
 	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
 	t.Setenv("NOMAD_ADDR", "http://127.0.0.1:14646")
 	t.Setenv("NOMAD_TOKEN", "")
@@ -81,10 +90,17 @@ func startNomad(t *testing.T) *nomadClient {
 		return err == nil
 	})
 	admin.SetSecretID(root.SecretID)
-	waitFor(t, 30*time.Second, func() bool {
+	ready := func() bool {
 		nodes, _, err := admin.Nodes().List(nil)
 		return err == nil && len(nodes) > 0 && nodes[0].Status == "ready"
-	})
+	}
+	waitFor(t, 30*time.Second, ready)
+	restart = func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+		start()
+		waitFor(t, 30*time.Second, ready)
+	}
 
 	job, err := admin.Jobs().ParseHCL(stubRunnerJob, true)
 	if err != nil {
@@ -113,11 +129,11 @@ func startNomad(t *testing.T) *nomadClient {
 		t.Fatal(err)
 	}
 	t.Setenv("NOMAD_TOKEN", tok.SecretID)
-	n, err := newNomadClient("default")
+	n, err = newNomadClient("default")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return n
+	return n, restart
 }
 
 func waitFor(t *testing.T, d time.Duration, cond func() bool) {
@@ -132,7 +148,7 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool) {
 
 func TestIntegrationRunnerLifecycle(t *testing.T) {
 	ctx := t.Context()
-	n := startNomad(t)
+	n, _ := startNomad(t)
 
 	if err := n.CheckRunnerJob(ctx, "narc-stub-runner"); err != nil {
 		t.Fatal(err)
@@ -180,25 +196,23 @@ func TestIntegrationRunnerLifecycle(t *testing.T) {
 	}
 	s.mu.Unlock()
 
-	// The event stream deletes the variable once the task has started...
+	// The event stream sees the task start...
 	waitFor(t, 30*time.Second, func() bool {
-		vars, _ := n.ListVars(ctx, "nomad/jobs/narc-stub-runner/")
-		return len(vars) == 0
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.runners[r.name].started
 	})
-	s.mu.Lock()
-	running := len(s.runners) == 1
-	s.mu.Unlock()
-	if !running {
-		t.Fatal("runner forgotten before its allocation ended")
-	}
 
-	// ...and forgets the runner once the allocation ends. It never ran a
-	// GitHub job, so it is deregistered.
+	// ...and forgets the runner and deletes its variable once the allocation
+	// ends. It never ran a GitHub job, so it is deregistered.
 	waitFor(t, 30*time.Second, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		return len(s.runners) == 0
 	})
+	if vars, _ := n.ListVars(ctx, "nomad/jobs/narc-stub-runner/"); len(vars) != 0 {
+		t.Fatalf("variable not deleted: %v", vars)
+	}
 	if !slices.Contains(gh.removed, r.runnerID) {
 		t.Fatalf("runner not deregistered: %v", gh.removed)
 	}
@@ -233,4 +247,43 @@ func TestIntegrationRunnerLifecycle(t *testing.T) {
 		defer s2.mu.Unlock()
 		return len(s2.runners) == 0
 	})
+}
+
+// A restarted Nomad agent re-renders the restored task's templates. The JIT
+// config variable must still be there: nomadVar would block on a deleted one
+// forever, and the task would never see its runner exit.
+func TestIntegrationAgentRestart(t *testing.T) {
+	ctx := t.Context()
+	n, restart := startNomad(t)
+
+	gh := &fakeGitHub{}
+	s := NewScaler(&ScaleSetConfig{Name: "nomad-linux", Job: "narc-stub-runner", Max: 1, MaxDuration: duration{time.Hour}},
+		"https://github.com/o", 7, gh, n, discard)
+	go n.Watch(ctx, []*Scaler{s}, discard)
+	time.Sleep(time.Second) // let the stream subscribe
+
+	s.HandleDesiredRunnerCount(ctx, 1)
+	s.mu.Lock()
+	s.demand = 0
+	var r runner
+	for _, v := range s.runners {
+		r = *v
+	}
+	s.mu.Unlock()
+	waitFor(t, 30*time.Second, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.runners[r.name].started
+	})
+
+	restart()
+
+	waitFor(t, 60*time.Second, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.runners) == 0
+	})
+	if allocs, _ := n.Allocs(ctx, r.jobID); len(allocs) != 1 || allocs[0].ClientStatus != api.AllocClientStatusComplete {
+		t.Fatalf("stub task lost its JIT config across the restart: %+v", allocs)
+	}
 }

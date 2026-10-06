@@ -172,8 +172,10 @@ job "narc-runner-qemu" {
       }
 
       # The whole user-data, with the JIT config inlined. change_mode must be
-      # noop: narc deletes the variable once this task starts, and the default
-      # (restart) would restart the VM.
+      # noop: the default (restart) would restart the VM, and a JIT config is
+      # single-use. A plain nomadVar, which waits for the variable: narc keeps
+      # it until the allocation ends, so a restarted Nomad agent can render
+      # this again. Don't guard it with nomadVarExists, which doesn't wait.
       template {
         destination = "secrets/seed/user-data"
         change_mode = "noop"
