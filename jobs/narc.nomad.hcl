@@ -62,6 +62,8 @@ job "narc" {
       template {
         destination = "secrets/app.pem"
         perms       = "0400"
+        uid         = 65534 # the image's USER; templates are root-owned by default
+        gid         = 65534
         data        = <<-EOT
           {{- with nomadVar "nomad/jobs/narc" }}{{ .app_private_key }}{{ end }}
         EOT
@@ -70,6 +72,8 @@ job "narc" {
       template {
         destination = "secrets/pat"
         perms       = "0400"
+        uid         = 65534 # the image's USER; templates are root-owned by default
+        gid         = 65534
         data        = <<-EOT
           {{- with nomadVar "nomad/jobs/narc" }}{{ .pat_stut }}{{ end }}
         EOT
