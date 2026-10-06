@@ -14,8 +14,12 @@
 # size, image or placement, and point a scale set's `job` at it.
 
 variable "image_url" {
-  description = "Base image URL. Pin a dated release, not current/."
-  default     = "https://cloud-images.ubuntu.com/releases/noble/release-20260926/noble-server-cloudimg-amd64.img"
+  description = <<-EOT
+    Base image URL. Pin a dated release, not current/. The file names differ:
+    current/ has noble-server-cloudimg-amd64.img, dated releases (and their
+    SHA256SUMS) have ubuntu-24.04-server-cloudimg-amd64.img.
+  EOT
+  default     = "https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.img"
 }
 
 variable "image_sha256" {
