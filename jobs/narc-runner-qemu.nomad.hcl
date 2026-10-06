@@ -38,7 +38,17 @@ variable "cpus" {
 }
 
 variable "memory_mb" {
-  default = 8192
+  description = "Memory for the whole task (the cgroup limit). The guest gets this less qemu_overhead_mb."
+  default     = 8192
+}
+
+variable "qemu_overhead_mb" {
+  description = <<-EOT
+    Memory kept back from the guest for QEMU itself (about 150-200 MB of its
+    own). Without it the guest can use the whole cgroup limit, and the
+    kernel's OOM killer kills QEMU mid-job.
+  EOT
+  default     = 1024
 }
 
 variable "runner_version" {
@@ -146,6 +156,8 @@ job "narc-runner-qemu" {
         args = [
           "-cpu", "host",
           "-smp", "${var.cpus}",
+          # The driver passes -m with the task's whole memory; QEMU uses the last -m.
+          "-m", "${var.memory_mb - var.qemu_overhead_mb}M",
           # The driver passes -m memory_mb, the same as the cgroup limit, and
           # QEMU's own overhead then pushes the process over it: the kernel
           # OOM-kills the VM under load. QEMU takes the last -m, so this one
