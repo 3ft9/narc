@@ -48,6 +48,8 @@ On NixOS, the flake's module does all of that except KVM. It works with either f
 }
 ```
 
+Runners don't survive a Nomad agent restart on a client with `drain_on_shutdown`: the drain stops them at its deadline. Restart those agents when no runners are up, or accept losing the jobs that are running.
+
 If the qemu plugin has an `args_allowlist`, it must allow `-cpu`, `-smp`, `-m`, `-nic` and `-drive`.
 
 **The Nomad cluster** needs ACLs with workload identity (Nomad 1.7+; tested against 1.11 and 2.0).
@@ -91,6 +93,8 @@ nomad job run jobs/narc.nomad.hcl
 Edit the config in the template in [`jobs/narc.nomad.hcl`](jobs/narc.nomad.hcl) first. Changing the config means re-running the job, which restarts narc. There's no hot reload.
 
 ### 4. Use it
+
+An org target's scale sets and runners show under the org's **Settings → Actions → Runners**, not on a repo's runners page, which stays empty.
 
 ```yaml
 jobs:
