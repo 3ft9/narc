@@ -99,14 +99,25 @@ func (n *nomadClient) Stop(ctx context.Context, jobID string) error {
 	return err
 }
 
-// CheckRunnerJob fetches a runner job and checks it against the runner job
-// contract.
-func (n *nomadClient) CheckRunnerJob(ctx context.Context, job string) error {
+// CheckRunnerJob fetches a runner job, checks it against the runner job
+// contract and returns its poststop tasks.
+func (n *nomadClient) CheckRunnerJob(ctx context.Context, job string) ([]string, error) {
 	j, _, err := n.c.Jobs().Info(job, n.q(ctx))
 	if err != nil {
-		return fmt.Errorf("read runner job %s: %w", job, err)
+		return nil, fmt.Errorf("read runner job %s: %w", job, err)
 	}
-	return checkRunnerJob(j)
+	return poststopTasks(j), checkRunnerJob(j)
+}
+
+func poststopTasks(j *api.Job) (names []string) {
+	for _, tg := range j.TaskGroups {
+		for _, t := range tg.Tasks {
+			if t.Lifecycle != nil && t.Lifecycle.Hook == api.TaskLifecycleHookPoststop {
+				names = append(names, t.Name)
+			}
+		}
+	}
+	return names
 }
 
 func checkRunnerJob(j *api.Job) error {

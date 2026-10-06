@@ -159,9 +159,11 @@ func TestLifecycle(t *testing.T) {
 	if r0.started {
 		t.Fatal("started before every task started")
 	}
-	// Every task started: booted, but the variable stays until the allocation
-	// ends, so a restarted Nomad agent can render it again.
+	// Every task but the poststop one started: booted, but the variable stays
+	// until the allocation ends, so a restarted Nomad agent can render it again.
+	s.SetPoststop([]string{"cleanup"})
 	tasks["vm"] = &api.TaskState{StartedAt: time.Now()}
+	tasks["cleanup"] = &api.TaskState{State: "pending"}
 	s.Observe(ctx, ids[0], "running", tasks)
 	if !r0.started {
 		t.Fatal("not started once every task started")
@@ -349,6 +351,11 @@ func TestCheckRunnerJob(t *testing.T) {
 	}
 	if err := checkRunnerJob(good()); err != nil {
 		t.Fatal(err)
+	}
+	j := good()
+	j.TaskGroups[0].Tasks = []*api.Task{{Name: "vm"}, {Name: "fetch", Lifecycle: &api.TaskLifecycle{Hook: "prestart"}}, {Name: "rm", Lifecycle: &api.TaskLifecycle{Hook: "poststop"}}}
+	if got := poststopTasks(j); !slices.Equal(got, []string{"rm"}) {
+		t.Errorf("poststopTasks = %v", got)
 	}
 	for name, mut := range map[string]func(*api.Job){
 		"service":       func(j *api.Job) { j.Type = new("service") },

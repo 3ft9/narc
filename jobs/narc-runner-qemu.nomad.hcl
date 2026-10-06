@@ -249,5 +249,26 @@ job "narc-runner-qemu" {
         memory = var.memory_mb
       }
     }
+
+    # The overlay holds everything the job wrote (often several GB), and a
+    # dead allocation's dir stays until the client garbage-collects it.
+    # Delete it as soon as the VM is gone.
+    task "remove-disk" {
+      lifecycle {
+        hook = "poststop"
+      }
+
+      driver = "docker"
+      user   = "root" # the overlay is root-owned
+      config {
+        image      = var.prestart_image
+        entrypoint = ["rm", "-f", "/alloc/disk.qcow2"]
+      }
+
+      resources {
+        cpu    = 100
+        memory = 32
+      }
+    }
   }
 }
