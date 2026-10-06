@@ -144,6 +144,11 @@ job "narc-runner-qemu" {
         args = [
           "-cpu", "host",
           "-smp", "${var.cpus}",
+          # The driver passes -m memory_mb, the same as the cgroup limit, and
+          # QEMU's own overhead then pushes the process over it: the kernel
+          # OOM-kills the VM under load. QEMU takes the last -m, so this one
+          # wins and leaves 1 GB of headroom.
+          "-m", "${var.memory_mb - 1024}M",
           "-nic", "user,model=virtio-net-pci",
           # cloud-init NoCloud seed: secrets/seed as a FAT disk labelled CIDATA.
           "-drive", "driver=vvfat,dir=${NOMAD_SECRETS_DIR}/seed,label=CIDATA,if=virtio,read-only=on",
