@@ -48,7 +48,7 @@ On NixOS, the flake's module does all of that except KVM. It works with either f
 }
 ```
 
-If the qemu plugin has an `args_allowlist`, it must allow `-cpu`, `-smp`, `-nic` and `-drive`.
+If the qemu plugin has an `args_allowlist`, it must allow `-cpu`, `-smp`, `-m`, `-nic` and `-drive`.
 
 **The Nomad cluster** needs ACLs with workload identity (Nomad 1.7+; tested against 1.11 and 2.0).
 
