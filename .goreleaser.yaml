@@ -15,7 +15,7 @@ checksum:
 
 dockers_v2:
   - images: ["ghcr.io/3ft9/narc"]
-    tags: ["{{ .Version }}", "latest"]
+    tags: ["{{ .Version }}"] # latest tracks main; see ci.yml
     platforms: [linux/amd64, linux/arm64]
     extra_files: [scripts/narc-image-fetch]
     labels:

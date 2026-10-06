@@ -196,6 +196,10 @@ This needs real GitHub credentials, so it doesn't run in CI.
 - Per-node image preparation (bake the runner and Docker in once per node) if boot time hurts.
 - Out of scope: HA/leader election (GitHub allows one session per scale set anyway), hot config reload, Firecracker, runner container hooks, an in-cluster image mirror.
 
+## Images and releases
+
+Every push to `main` publishes `ghcr.io/3ft9/narc:latest` and `ghcr.io/3ft9/narc:sha-<short commit>`. Pin deployments to a `sha-` tag (`-var image=…` on `narc.nomad.hcl`, `-var prestart_image=…` on the runner job) so you know what's running. Tagging `vX.Y.Z` publishes a versioned image, linux binaries and checksums via GoReleaser.
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
