@@ -176,6 +176,7 @@ Any image that boots under KVM, reads a NoCloud seed (or mounts the `CIDATA` dis
   - `narc_variable_sweeps_total`: orphaned JIT config variables removed on startup
 - `/healthz`: 200 once every scale set has an active message session, otherwise 503.
 - JSON logs on stdout.
+- An example Grafana dashboard for the metrics above: [`examples/grafana-dashboard.json`](examples/grafana-dashboard.json). Import it and pick a Prometheus data source; it filters by target and scale set.
 
 ## Testing
 
