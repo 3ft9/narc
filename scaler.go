@@ -30,7 +30,7 @@ type Nomad interface {
 	PutVar(ctx context.Context, path string, items map[string]string) error
 	DeleteVar(ctx context.Context, path string) error
 	ListVars(ctx context.Context, prefix string) ([]string, error)
-	Dispatch(ctx context.Context, job, runnerName string) (dispatchedID string, err error)
+	Dispatch(ctx context.Context, job string, meta map[string]string) (dispatchedID string, err error)
 	Children(ctx context.Context, job string) ([]*api.JobListStub, error)
 	Allocs(ctx context.Context, jobID string) ([]*api.AllocationListStub, error)
 	Stop(ctx context.Context, jobID string) error
@@ -96,6 +96,11 @@ func parseRunnerName(name string) (scaleSetID int, ok bool) {
 	id, err := strconv.Atoi(m[1])
 	return id, err == nil
 }
+
+// dispatchMeta is the meta narc dispatches runner jobs with. narc_target and
+// narc_scaleset tell startup recovery which scale set owns a runner: scale set
+// IDs are only unique per target, and several targets may share a runner job.
+var dispatchMeta = []string{"runner_name", "narc_target", "narc_scaleset"}
 
 func varPath(job, runnerName string) string { return "nomad/jobs/" + job + "/" + runnerName }
 
@@ -172,7 +177,7 @@ func (s *Scaler) start(ctx context.Context) error {
 		s.deregister(ctx, r)
 		return fmt.Errorf("write variable %s: %w", path, err)
 	}
-	r.jobID, err = s.nomad.Dispatch(ctx, s.Job, name)
+	r.jobID, err = s.nomad.Dispatch(ctx, s.Job, map[string]string{"runner_name": name, "narc_target": s.Target, "narc_scaleset": s.Name})
 	if err != nil {
 		s.deleteVar(ctx, r)
 		s.deregister(ctx, r)
@@ -362,6 +367,17 @@ func (s *Scaler) updateGauge() {
 	runnersByState.WithLabelValues(s.Target, s.Name, "busy").Set(busy)
 }
 
+// owns reports whether a dispatched child's meta names this scale set.
+// Children dispatched before narc set narc_target are matched by the scale
+// set ID in the runner name, which is ambiguous across targets.
+func (s *Scaler) owns(meta map[string]string) bool {
+	if t, ok := meta["narc_target"]; ok {
+		return t == s.Target && meta["narc_scaleset"] == s.Name
+	}
+	id, ok := parseRunnerName(meta["runner_name"])
+	return ok && id == s.ID
+}
+
 // Recover rebuilds state for one runner job on startup: it adopts live
 // dispatched children into their scale sets and sweeps JIT config variables
 // with no live child. It must run before any listener dispatches.
@@ -377,16 +393,19 @@ func Recover(ctx context.Context, nomad Nomad, job string, scalers []*Scaler, lo
 			continue
 		}
 		live[name] = true
-		id, _ := parseRunnerName(name)
-		adopted := false
+		var owners []*Scaler
 		for _, s := range scalers {
-			if s.Job == job && s.ID == id {
-				s.Adopt(c)
-				adopted = true
+			if s.Job == job && s.owns(c.Meta) {
+				owners = append(owners, s)
 			}
 		}
-		if !adopted {
+		switch len(owners) {
+		case 1:
+			owners[0].Adopt(c)
+		case 0:
 			log.Warn("live runner belongs to no configured scale set; leaving it to finish", "nomad_job", c.ID, "runner", name)
+		default:
+			log.Warn("live runner has no narc_target meta and matches several scale sets; leaving it to finish", "nomad_job", c.ID, "runner", name)
 		}
 	}
 

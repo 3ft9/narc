@@ -72,13 +72,13 @@ func (f *fakeNomad) ListVars(_ context.Context, prefix string) ([]string, error)
 	}
 	return out, nil
 }
-func (f *fakeNomad) Dispatch(_ context.Context, job, name string) (string, error) {
+func (f *fakeNomad) Dispatch(_ context.Context, job string, meta map[string]string) (string, error) {
 	if f.failDispatch {
 		return "", errors.New("boom")
 	}
 	f.n++
 	id := fmt.Sprintf("%s/dispatch-%d", job, f.n)
-	f.jobs[id] = &api.JobListStub{ID: id, ParentID: job, Status: "pending", Meta: map[string]string{"runner_name": name}, SubmitTime: time.Now().UnixNano()}
+	f.jobs[id] = &api.JobListStub{ID: id, ParentID: job, Status: "pending", Meta: meta, SubmitTime: time.Now().UnixNano()}
 	return id, nil
 }
 func (f *fakeNomad) Children(_ context.Context, job string) ([]*api.JobListStub, error) {
@@ -309,13 +309,37 @@ func TestRecover(t *testing.T) {
 	}
 }
 
+// Two targets share a runner job, and GitHub gave both scale sets ID 1.
+func TestRecoverSharedJob(t *testing.T) {
+	ctx := t.Context()
+	gh, n := &fakeGitHub{}, newFakeNomad()
+	a := newTestScaler(gh, n, 3, 0)
+	b := newTestScaler(gh, n, 3, 0)
+	a.ID, b.ID, b.Target = 1, 1, "https://github.com/p/r"
+
+	a.HandleDesiredRunnerCount(ctx, 2)
+	b.HandleDesiredRunnerCount(ctx, 1)
+	n.jobs["runner/dispatch-old"] = &api.JobListStub{ID: "runner/dispatch-old", ParentID: "runner", Status: "running", Meta: map[string]string{"runner_name": "nomad-linux-1-0000000a"}}
+
+	a2, b2 := newTestScaler(gh, n, 3, 0), newTestScaler(gh, n, 3, 0)
+	a2.ID, b2.ID, b2.Target = 1, 1, "https://github.com/p/r"
+	if err := Recover(ctx, n, "runner", []*Scaler{a2, b2}, discard); err != nil {
+		t.Fatal(err)
+	}
+	// Each adopts only its own; the child from an older narc is ambiguous.
+	if !slices.Equal(slices.Sorted(maps.Keys(a2.runners)), slices.Sorted(maps.Keys(a.runners))) ||
+		!slices.Equal(slices.Sorted(maps.Keys(b2.runners)), slices.Sorted(maps.Keys(b.runners))) {
+		t.Fatalf("adopted a=%v b=%v", maps.Keys(a2.runners), maps.Keys(b2.runners))
+	}
+}
+
 func TestCheckRunnerJob(t *testing.T) {
 	zero, f := 0, false
 	good := func() *api.Job {
 		return &api.Job{
 			ID:               new("runner"),
 			Type:             new("batch"),
-			ParameterizedJob: &api.ParameterizedJobConfig{MetaRequired: []string{"runner_name"}},
+			ParameterizedJob: &api.ParameterizedJobConfig{MetaRequired: []string{"runner_name"}, MetaOptional: []string{"narc_target", "narc_scaleset"}},
 			TaskGroups: []*api.TaskGroup{{
 				Name:             new("g"),
 				RestartPolicy:    &api.RestartPolicy{Attempts: &zero},
@@ -330,6 +354,7 @@ func TestCheckRunnerJob(t *testing.T) {
 		"service":       func(j *api.Job) { j.Type = new("service") },
 		"not param":     func(j *api.Job) { j.ParameterizedJob = nil },
 		"no meta":       func(j *api.Job) { j.ParameterizedJob.MetaRequired = nil },
+		"no owner meta": func(j *api.Job) { j.ParameterizedJob.MetaOptional = nil },
 		"restarts":      func(j *api.Job) { j.TaskGroups[0].RestartPolicy.Attempts = new(2) },
 		"reschedules":   func(j *api.Job) { j.TaskGroups[0].ReschedulePolicy.Attempts = new(1) },
 		"unlimited":     func(j *api.Job) { j.TaskGroups[0].ReschedulePolicy.Unlimited = new(true) },

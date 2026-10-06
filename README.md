@@ -124,7 +124,7 @@ TOML. A full example with comments is in [`examples/narc.toml`](examples/narc.to
 
 narc is driver-agnostic: any job meeting this contract works. A runner job must:
 
-- be a **parameterized batch job** accepting meta `runner_name`
+- be a **parameterized batch job** accepting meta `runner_name`, `narc_target` and `narc_scaleset` (the last two tell a restarted narc which scale set owns a runner, since several targets may share a job)
 - render the JIT config from `nomad/jobs/<parent job>/<runner_name>` (key `jitconfig`) with **`change_mode = "noop"`** and a plain `nomadVar`
   ```hcl
   {{ with nomadVar (printf "nomad/jobs/%s/%s" (env "NOMAD_JOB_PARENT_ID") (env "NOMAD_META_runner_name")) }}{{ .jitconfig }}{{ end }}
