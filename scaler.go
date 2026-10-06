@@ -42,9 +42,9 @@ type runner struct {
 	runnerID   int64  // GitHub runner ID; 0 if unknown (adopted on startup)
 	dispatched time.Time
 	adopted    bool
-	started    bool // every task has started: booted, waiting for a job
-	busy       bool // JobStarted seen
-	done       bool // JobCompleted seen, so GitHub already removed the runner
+	started    bool      // every task has started: booted, waiting for a job
+	busy       bool      // JobStarted seen
+	completed  time.Time // JobCompleted seen, so GitHub already removed the runner
 }
 
 // Scaler manages the runners of one scale set. It implements listener.Scaler.
@@ -134,7 +134,7 @@ func (s *Scaler) HandleJobCompleted(ctx context.Context, j *scaleset.JobComplete
 	defer s.mu.Unlock()
 	s.log.Info("job completed", "runner", j.RunnerName, "result", j.Result)
 	if r := s.runners[j.RunnerName]; r != nil {
-		r.done = true
+		r.completed = s.now()
 	}
 	// The slot frees when the allocation ends (VM powered off), not here,
 	// so narc never has more than max VMs at once.
@@ -247,9 +247,9 @@ func (s *Scaler) byJob(jobID string) *runner {
 // template that doesn't block instead re-renders the file without the JIT
 // config while the VM may still be reading it.
 func (s *Scaler) finish(ctx context.Context, r *runner, why string) {
-	s.log.Info("runner ended", "runner", r.name, "reason", why, "completed_job", r.done)
+	s.log.Info("runner ended", "runner", r.name, "reason", why, "completed_job", !r.completed.IsZero())
 	s.deleteVar(ctx, r)
-	if !r.done {
+	if r.completed.IsZero() {
 		s.deregister(ctx, r)
 	}
 	delete(s.runners, r.name)
@@ -283,8 +283,16 @@ func (s *Scaler) deregister(ctx context.Context, r *runner) {
 	s.log.Info("deregistered runner", "runner", r.name)
 }
 
+// completedGrace is how long a runner's allocation may outlive its GitHub
+// job. The VM powers off seconds after the runner exits; an allocation still
+// running long after that is stuck (a VM that never powered off, or a task
+// runner that lost track of its VM) and would otherwise hold a slot until
+// max_duration.
+const completedGrace = 10 * time.Minute
+
 // Reconcile is the periodic backstop for everything the event stream should
-// have told us: ended jobs, started tasks, and runners over max duration.
+// have told us: ended jobs, started tasks, runners whose allocation outlives
+// their job, and runners over max duration.
 func (s *Scaler) Reconcile(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -310,11 +318,18 @@ func (s *Scaler) Reconcile(ctx context.Context) error {
 				continue
 			}
 		}
-		if s.now().Sub(r.dispatched) > s.MaxDuration {
-			s.log.Warn("runner exceeded max duration, stopping", "runner", r.name, "max_duration", s.MaxDuration)
-			if err := s.nomad.Stop(ctx, r.jobID); err != nil {
-				s.log.Error("stop runner failed", "runner", r.name, "error", err)
-			}
+		var why string
+		switch {
+		case !r.completed.IsZero() && s.now().Sub(r.completed) > completedGrace:
+			why = "allocation still running after its job completed"
+		case s.now().Sub(r.dispatched) > s.MaxDuration:
+			why = "runner exceeded max duration"
+		default:
+			continue
+		}
+		s.log.Warn(why+", stopping", "runner", r.name, "max_duration", s.MaxDuration)
+		if err := s.nomad.Stop(ctx, r.jobID); err != nil {
+			s.log.Error("stop runner failed", "runner", r.name, "error", err)
 		}
 	}
 	return s.scaleUp(ctx)
