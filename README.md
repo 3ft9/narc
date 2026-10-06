@@ -34,14 +34,13 @@ GitHub scale set API ──long poll──▶ narc ──dispatch──▶ Nomad
 - A host volume `narc-images` for the per-node image cache (for example `/var/lib/narc/images`).
 - The Docker driver, for the reference job's prestart task.
 
-On NixOS, the flake's module does all of that except KVM:
+On NixOS, the flake's module does all of that except KVM. It works with either firewall: with `networking.nftables.enable` the egress rules are one of its tables; otherwise (the iptables-based `networking.firewall` that Docker and Tailscale expect) a `narc-egress` unit loads them as a separate `inet narc` table before Nomad starts. It also keeps dhcpcd off the bridge.
 
 ```nix
 {
   inputs.narc.url = "github:3ft9/narc";
   # ...
   imports = [ narc.nixosModules.node ];
-  networking.nftables.enable = true;
   services.narc-node = {
     enable = true;
     nodeAddresses = [ "203.0.113.1" "203.0.113.2" "203.0.113.3" ];
