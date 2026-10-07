@@ -161,7 +161,7 @@ Any image that boots under KVM, reads a NoCloud seed (or mounts the `CIDATA` dis
 - **Untrusted code runs in a VM.** Each job gets a fresh VM behind a hardware virtualisation boundary, with a copy-on-write disk deleted with the allocation. Nothing persists between jobs. The workload never gets privileges on the node.
 - **Internet egress only.** Runner VMs sit on their own CNI bridge. The nftables rules drop traffic from it to RFC 1918, CGNAT/tailnet (`100.64.0.0/10`), link-local and metadata, loopback, IPv6 ULA and link-local, every node's public addresses, and the node itself. No CI job can reach Nomad, Consul, Vault or anything else in the cluster. Guests use public DNS resolvers.
 - **The JIT config is a credential.** Whoever reads it first can take the runner's job, secrets included. It never appears in dispatch meta or payloads, which anyone with `read-job` can see. It lives in a Nomad Variable until the runner's allocation ends, readable only by the runner job's template (narc can write, list and delete it, not read it). It's also in the task's `secrets/` dir (not exposed by `nomad alloc fs`) and the VM's seed disk. By the time any workflow step runs, it has been used.
-- **Least-privilege Nomad access.** narc uses workload identity with no long-lived token. Its policy grants `list-jobs`, `read-job`, `dispatch-job` and `alloc-lifecycle`, plus variables under the runner jobs' prefixes. It deliberately doesn't grant `submit-job`, which would let a compromised narc register arbitrary jobs. As a result, narc can't stop a dispatched runner that never got placed; that job stays pending until it's placed (and then stopped) or removed by hand.
+- **Least-privilege Nomad access.** narc uses workload identity with no long-lived token. Its policy grants `list-jobs`, `read-job`, `dispatch-job` and `scale-job`, plus variables under the runner jobs' prefixes. narc stops a runner by scaling its dispatched job to 0, not by stopping its allocation: Nomad replaces a stopped allocation whatever the reschedule policy, and the replacement would wait forever for a JIT config narc has already deleted. It deliberately doesn't grant `submit-job`, which would let a compromised narc register arbitrary jobs.
 - **Sibling visibility.** Each dispatch of a runner job could technically read every sibling's variable, but only through its template, which the jobspec controls. The guest has no Nomad token.
 - **Untrusted pull requests.** The VM boundary protects the cluster, not your secrets. GitHub's usual rules about running workflows from forks still apply.
 
@@ -185,7 +185,7 @@ go test ./...                                         # unit tests
 go test -tags integration -run Integration -v ./...   # needs `nomad` on PATH
 ```
 
-The integration test starts an ACL-enabled single-node Nomad agent on port 14646. It applies the shipped policies to a stub `raw_exec` runner job and a narc token, then runs a runner through dispatch, completion, variable deletion, deregistration, restart adoption and max-duration stop. It also restarts the agent under a live runner, and checks that the runner still has its JIT config and that its allocation completes. Missing ACL capabilities fail it.
+The integration test starts an ACL-enabled single-node Nomad agent on port 14646. It applies the shipped policies to a stub `raw_exec` runner job and a narc token, then runs a runner through dispatch, completion, variable deletion, deregistration, restart adoption and max-duration stop (with no replacement allocation). It also restarts the agent under a live runner, and checks that the runner still has its JIT config and that its allocation completes. Missing ACL capabilities fail it.
 
 ### End to end
 
@@ -196,7 +196,7 @@ This needs real GitHub credentials, so it doesn't run in CI.
 3. Check `/healthz` returns 200, and that the scale set appears under the repo's **Settings → Actions → Runners**.
 4. Push a workflow with `runs-on: narc-e2e` that runs `docker run --rm hello-world` and `sudo true`.
 5. Watch for: a dispatched `narc-runner-qemu/dispatch-…` job; `nomad var list nomad/jobs/narc-runner-qemu/` showing the runner's variable; the job passing; the VM powering off, the allocation completing and the variable gone; `narc_runners` back to `warm`.
-6. Kill a VM mid-job (`nomad alloc stop`) and check that the runner disappears from GitHub and `narc_runner_deregistrations_total` increases.
+6. Kill a VM mid-job (`nomad job scale <dispatched job> runner 0`; not `nomad alloc stop`, which gets a replacement) and check that the runner disappears from GitHub and `narc_runner_deregistrations_total` increases.
 7. Remove the scale set from the config, restart narc, and check that it's deleted on GitHub.
 
 ## Not yet done

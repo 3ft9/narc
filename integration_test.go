@@ -255,6 +255,10 @@ func TestIntegrationRunnerLifecycle(t *testing.T) {
 	if len(s2.runners) != 1 {
 		t.Fatalf("adopted %d runners, want 1", len(s2.runners))
 	}
+	var adopted runner
+	for _, v := range s2.runners {
+		adopted = *v
+	}
 
 	// Max duration stops the job, and reconcile notices it's dead.
 	s2.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
@@ -268,6 +272,13 @@ func TestIntegrationRunnerLifecycle(t *testing.T) {
 		defer s2.mu.Unlock()
 		return len(s2.runners) == 0
 	})
+	// Nothing replaces the stopped allocation.
+	allocs, _ = n.Allocs(ctx, adopted.jobID)
+	for _, a := range allocs {
+		if a.DesiredStatus == api.AllocDesiredStatusRun {
+			t.Fatalf("stopped runner has a live allocation: %+v", a)
+		}
+	}
 }
 
 // A restarted Nomad agent re-renders the restored task's templates. The JIT
