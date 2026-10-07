@@ -75,28 +75,27 @@ func (n *nomadClient) Allocs(ctx context.Context, jobID string) ([]*api.Allocati
 	return allocs, err
 }
 
-// Stop stops a dispatched runner's allocations, which needs only
-// alloc-lifecycle. Stopping a job that was never placed needs submit-job,
-// which narc's policy deliberately doesn't grant; that call is then refused
-// and the job stays pending until placed (and then stopped) or removed by hand.
+// Stop ends a dispatched runner by scaling its groups to 0. Stopping its
+// allocations instead doesn't end it: Nomad places a replacement for a
+// stopped allocation whatever the reschedule policy, and the replacement
+// waits forever for a JIT config narc has already deleted, holding the
+// node's resources. Scaling needs only scale-job, not submit-job, and also
+// ends a job that was never placed.
 func (n *nomadClient) Stop(ctx context.Context, jobID string) error {
-	allocs, err := n.Allocs(ctx, jobID)
+	j, _, err := n.c.Jobs().Info(jobID, n.q(ctx))
 	if err != nil {
 		return err
 	}
-	stopped := false
-	for _, a := range allocs {
-		if a.ClientStatus == api.AllocClientStatusPending || a.ClientStatus == api.AllocClientStatusRunning {
-			if _, err := n.c.Allocations().Stop(&api.Allocation{ID: a.ID, Namespace: n.ns}, n.q(ctx)); err != nil {
-				return err
-			}
-			stopped = true
+	zero := 0
+	for _, tg := range j.TaskGroups {
+		if deref(tg.Count) == 0 {
+			continue
+		}
+		if _, _, err := n.c.Jobs().Scale(jobID, deref(tg.Name), &zero, "narc: stop runner", false, nil, n.w(ctx)); err != nil {
+			return err
 		}
 	}
-	if !stopped {
-		_, _, err = n.c.Jobs().Deregister(jobID, false, n.w(ctx))
-	}
-	return err
+	return nil
 }
 
 // CheckRunnerJob fetches a runner job, checks it against the runner job

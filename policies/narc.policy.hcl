@@ -5,9 +5,10 @@
 # Add a variables path block per runner job if you run more than one.
 namespace "default" {
   # read-job: job/allocation status and the allocation event stream.
-  # dispatch-job: start runners. alloc-lifecycle: stop runners over max duration.
+  # dispatch-job: start runners. scale-job: stop runners (count 0), since a
+  # stopped allocation gets a replacement.
   # Deliberately not submit-job, which would let narc register arbitrary jobs.
-  capabilities = ["list-jobs", "read-job", "dispatch-job", "alloc-lifecycle"]
+  capabilities = ["list-jobs", "read-job", "dispatch-job", "scale-job"]
 
   variables {
     # Per-runner JIT configs.
